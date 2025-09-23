@@ -1,0 +1,9 @@
+body {
+  margin: 0;
+  font-family: system-ui, sans-serif;
+}
+pre {
+  padding: 0.5rem;
+  border-radius: 0.5rem;
+  overflow-x: auto;
+}
