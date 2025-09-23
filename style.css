@@ -1,9 +1,23 @@
 body {
-  margin: 0;
-  font-family: system-ui, sans-serif;
+	margin: 0;
+	font-family: system-ui, sans-serif;
 }
 pre {
-  padding: 0.5rem;
-  border-radius: 0.5rem;
-  overflow-x: auto;
+	padding: 0.5rem;
+	border-radius: 0.5rem;
+	overflow-x: auto;
+}
+::-webkit-scrollbar {
+	width: 8px;
+	height: 8px;
+}
+::-webkit-scrollbar-track {
+	background: #f1f1f1;
+}
+::-webkit-scrollbar-thumb {
+	background: #888;
+	border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+	background: #555;
 }
