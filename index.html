@@ -355,38 +355,48 @@
 				};
 
 				const handleExport = async () => {
+					// Validasi: Pastikan file zip asli ada
+					if (!project.originalFile) {
+						console.error("File zip asli tidak tersedia. Pastikan file ini diteruskan dalam prop 'project'.");
+						return;
+					}
+
 					const dataToExport = {
 						sources: sources,
-						citations: citations.map(({ isEditing, ...rest }) => rest),
+						// Hapus properti sementara (seperti isEditing dan color) sebelum diekspor
+						citations: citations.map(({ isEditing, color, ...rest }) => rest),
 					};
 					const jsonString = JSON.stringify(dataToExport, null, 2);
 
-					// Format tanggal-jam
-					const now = new Date();
-					const pad = (num) => String(num).padStart(2, "0");
+					try {
+						// INI BAGIAN KUNCINYA: Muat file zip ASLI yang diunggah
+						const zip = await JSZip.loadAsync(project.originalFile);
 
-					const timestamp = `codecite-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-					const filename = `${project.name}.codesite-${timestamp}.zip`;
+						// Tambahkan file metadata .json ke dalam objek zip yang sudah ada
+						zip.file(`${project.name}.codesite.json`, jsonString);
 
-					// Asumsikan kamu sudah punya `uploadedZip` (hasil extract upload awal)
-					// atau kalau kamu hanya punya folder di memori, rebuild pakai JSZip
-					const zip = new JSZip();
+						// Generate file zip BARU yang sudah berisi file lama + file metadata
+						const newZipBlob = await zip.generateAsync({ type: "blob" });
 
-					// Masukkan kembali folder hasil upload
-					if (project.files) {
-						project.files.forEach((file) => {
-							zip.file(file.path, file.content);
-						});
+						// Buat nama file unik dengan timestamp
+						const now = new Date();
+						const pad = (num) => String(num).padStart(2, "0");
+						const timestamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+						const newFilename = `${project.name}-codecite-${timestamp}.zip`;
+
+						// Memicu unduhan di browser
+						const link = document.createElement("a");
+						link.href = URL.createObjectURL(newZipBlob);
+						link.download = newFilename;
+						document.body.appendChild(link);
+						link.click();
+						document.body.removeChild(link);
+						URL.revokeObjectURL(link.href); // Membersihkan memori
+					} catch (error) {
+						console.error("Gagal memproses atau membuat file zip:", error);
 					}
-
-					// Tambahkan JSON hasil sitasi
-					zip.file(`${project.name}.codesite.json`, jsonString);
-
-					// Generate ZIP baru
-					const content = await zip.generateAsync({ type: "blob" });
-					saveAs(content, filename);
 				};
-
+				
 				return React.createElement(
 					"div",
 					{ className: "bg-white p-4 rounded-lg shadow-lg h-[80vh] flex flex-col" },
