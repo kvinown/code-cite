@@ -37,6 +37,28 @@
 		<link
 			rel="stylesheet"
 			href="style.css" />
+
+		<!-- CSS BARU untuk Efek Flash -->
+		<style>
+			@keyframes flash-animation {
+				0% {
+					background-color: rgba(252, 211, 77, 0); /* yellow-300/0 */
+				}
+				25% {
+					background-color: rgba(252, 211, 77, 0.6); /* yellow-300/60 */
+				}
+				75% {
+					background-color: rgba(252, 211, 77, 0.6); /* yellow-300/60 */
+				}
+				100% {
+					background-color: rgba(252, 211, 77, 0); /* yellow-300/0 */
+				}
+			}
+
+			.flash-highlight {
+				animation: flash-animation 1.5s ease-out;
+			}
+		</style>
 	</head>
 	<body class="bg-gray-100">
 		<div id="root"></div>
@@ -71,7 +93,7 @@
 							),
 							React.createElement("span", { className: "ml-3 text-2xl font-bold text-gray-800" }, "Code Cite")
 						),
-						React.createElement("div", { className: "text-gray-600" }, "Hello KEVIN OWEN, You logged in as student.")
+						React.createElement("div", { className: "text-gray-600" }, "Hello John Doe")
 					)
 				);
 
@@ -272,14 +294,352 @@
 			//==================================================
 
 			//==================================================
+			// Helper: Auto Citation Parsers
+			//==================================================
+
+			/**
+			 * Mengidentifikasi tipe file berdasarkan nama file.
+			 * @param {string} fileName - Nama file (misal: "main.py", "App.java")
+			 * @returns {string|null} - 'python', 'java', atau null
+			 */
+			function getFileType(fileName) {
+				if (fileName.endsWith(".py")) {
+					return "python";
+				}
+				if (fileName.endsWith(".java")) {
+					return "java";
+				}
+				return null;
+			}
+
+			/**
+			 * [FINAL UPGRADE]
+			 * Mem-parsing konten kode untuk sitasi otomatis berdasarkan komentar.
+			 * @param {string} codeContent - Seluruh isi file kode sebagai string.
+			 * @param {string} fileType - Tipe file ('python' atau 'java').
+			 * @returns {Array<Object>} - Array berisi objek sitasi yang ditemukan.
+			 */
+			function parseCitationsFromCode(codeContent, fileType) {
+				const newCitations = [];
+				if (!codeContent || !fileType) {
+					return newCitations;
+				}
+
+				const lines = codeContent.split("\n");
+
+				// Definisikan semua regex berdasarkan tipe file
+				let commentPrefix, citeRegex, citeStartRegex, citeEndRegex, isCommentRegex, separatorRegex, commentPrefixRegex, keyValRegex;
+
+				if (fileType === "python") {
+					commentPrefix = "#";
+					isCommentRegex = /^\s*#/;
+				} else if (fileType === "java") {
+					commentPrefix = "\/\/";
+					isCommentRegex = /^\s*\/\//;
+				} else {
+					return newCitations; // Tipe file tidak didukung
+				}
+
+				// Regex dinamis berdasarkan prefix komentar
+				citeRegex = new RegExp(`^\\s*${commentPrefix}\\s*CITE:\\s*(.*)$`, "i");
+				citeStartRegex = new RegExp(`^\\s*${commentPrefix}\\s*CITE-START:\\s*(.*)$`, "i");
+				citeEndRegex = new RegExp(`^\\s*${commentPrefix}\\s*CITE-END\\s*$`, "i");
+				separatorRegex = new RegExp(`^\\s*${commentPrefix}\\s*---\\s*$`, "i");
+				commentPrefixRegex = (fileType === "python") ? /^\s*#\s*/ : /^\s*\/\/\s*/;
+				keyValRegex = /^\s*([a-zA-Z]+):\s*(.*)$/; // Regex untuk "Key: Value"
+
+				// Loop utama
+				for (let i = 0; i < lines.length; i++) {
+					const line = lines[i];
+					const lineNumber = i + 1; // 1-based index
+
+					const citeStartMatch = line.match(citeStartRegex);
+					const citeMatch = line.match(citeRegex);
+
+					// --- Skenario 1 & 2: Blok Sitasi (CITE-START) ---
+					if (citeStartMatch) {
+						const firstLineText = citeStartMatch[1].trim(); // Teks di baris CITE-START:
+						let sourceData = {};
+						let metadataLines = [];
+						let codeStartIndex = -1;
+
+						// 1. Parse Metadata (baris antara CITE-START dan ---)
+						let j;
+						for (j = i + 1; j < lines.length; j++) {
+							const currentLine = lines[j];
+							if (citeEndRegex.test(currentLine)) break; // Menemukan CITE-END (tanpa kode)
+							if (separatorRegex.test(currentLine)) {
+								codeStartIndex = j + 1; // Kode dimulai setelah separator
+								break;
+							}
+							metadataLines.push(currentLine); // Ini adalah baris metadata
+						}
+
+						if (j === lines.length) {
+							// Tidak menemukan separator atau CITE-END
+							console.warn(`CITE-START di baris ${lineNumber} tidak ditutup atau tidak memiliki separator '---'.`);
+							continue;
+						}
+
+						// 2. Ekstrak data dari metadata
+						let hasStructuredKeys = false;
+						// Gabungkan teks dari baris CITE-START: dan baris metadata
+						const allMetadataText = [firstLineText, ...metadataLines];
+
+						for (const rawLine of allMetadataText) {
+							let cleanLine = rawLine.replace(commentPrefixRegex, "").trim();
+							const match = cleanLine.match(keyValRegex);
+
+							if (match) {
+								hasStructuredKeys = true;
+								const key = match[1].trim().toLowerCase();
+								const value = match[2].trim();
+								if (key === "judul") sourceData.title = value;
+								else if (key === "tipe") sourceData.type = value.toLowerCase();
+								else if (key === "value") sourceData.value = value;
+								else if (key === "notes") sourceData.notes = value;
+							}
+						}
+
+						// 3. Tentukan Judul
+						// Jika tidak ada 'Judul:' key, TAPI ada teks di baris CITE-START:, gunakan itu sebagai judul
+						if (!sourceData.title && !hasStructuredKeys && firstLineText) {
+							sourceData.title = firstLineText;
+						}
+
+						if (!sourceData.title) {
+							console.warn(`CITE-START di baris ${lineNumber} tidak memiliki 'Judul:' atau teks judul sederhana.`);
+							i = j; // Loncat ke separator/CITE-END
+							continue;
+						}
+
+						// 4. Cek apakah ada blok kode
+						if (codeStartIndex === -1) {
+							console.warn(`CITE-START di baris ${lineNumber} tidak memiliki '---' separator untuk blok kode.`);
+							i = j; // Loncat ke CITE-END
+							continue;
+						}
+
+						// 5. Cari CITE-END untuk blok kode
+						let codeEndIndex = -1;
+						let k;
+						for (k = codeStartIndex; k < lines.length; k++) {
+							if (citeEndRegex.test(lines[k])) {
+								codeEndIndex = k; // Kode berakhir di baris *sebelum* CITE-END
+								break;
+							}
+						}
+
+						if (codeEndIndex === -1) {
+							console.warn(`CITE-START di baris ${lineNumber} tidak memiliki CITE-END setelah '---'.`);
+							continue; // Biarkan loop 'i' berlanjut
+						}
+
+						// 6. Buat sitasi
+						const codeBlock = lines.slice(codeStartIndex, codeEndIndex).join("\n");
+						// Validasi: Jangan sitasi jika baris 'start' > 'end' (blok kode kosong)
+						if (codeStartIndex >= codeEndIndex) {
+							console.warn(`CITE-START di baris ${lineNumber} memiliki blok kode kosong.`);
+							i = k; // Loncat ke CITE-END
+							continue;
+						}
+
+						newCitations.push({
+							start: codeStartIndex + 1, // 1-based
+							end: codeEndIndex, // 1-based (baris terakhir kode adalah `k-1`, indexnya `k`)
+							code: codeBlock,
+							sourceData: sourceData, // Kirim objek lengkap
+						});
+
+						i = k; // Loncat loop utama ke CITE-END
+					}
+					// --- Skenario 3: Sitasi Satu Baris (CITE:) ---
+					else if (citeMatch) {
+						const sourceText = citeMatch[1].trim();
+						if (!sourceText) continue; // Abaikan CITE: kosong
+
+						let nextCodeLine = null;
+						let nextCodeLineNumber = -1;
+
+						// Cari baris kode valid berikutnya
+						for (let j = i + 1; j < lines.length; j++) {
+							const potentialCodeLine = lines[j];
+							const isEmpty = potentialCodeLine.trim() === "";
+							const isComment = isCommentRegex.test(potentialCodeLine.trim());
+
+							// Cek apakah ini tag sitasi lain
+							const isCiteTag =
+								citeRegex.test(potentialCodeLine) ||
+								citeStartRegex.test(potentialCodeLine) ||
+								citeEndRegex.test(potentialCodeLine);
+
+							if (!isEmpty && !isComment && !isCiteTag) {
+								nextCodeLine = potentialCodeLine.trim();
+								nextCodeLineNumber = j + 1; // 1-based
+								break;
+							}
+						}
+
+						if (nextCodeLine) {
+							newCitations.push({
+								start: nextCodeLineNumber,
+								end: nextCodeLineNumber,
+								code: nextCodeLine,
+								sourceData: { title: sourceText }, // Format Cepat hanya punya judul
+							});
+
+							i = nextCodeLineNumber - 1; // Loncat ke baris kode yg baru disitasi
+						}
+					}
+				}
+				return newCitations;
+			}
+			//==================================================
+			// Helper: Auto Citation Parsers End
+			//==================================================
+
+			//==================================================
 			// Component: Workspace
 			//==================================================
 			const COLORS = ["bg-cyan-900/60", "bg-green-900/60", "bg-purple-900/60", "bg-pink-900/60", "bg-yellow-700/60"];
 
+			/**
+			 * Helper function untuk mencari file node di dalam tree berdasarkan path.
+			 * @param {Object} rootChildren - Objek 'children' dari node project.
+			 * @param {string} path - Path file yang dicari (e.g., "src/MainApp.java").
+			 * @returns {Object|null} - Node file jika ditemukan, atau null.
+			 */
+			const findFileNodeByPath = (rootChildren, path) => {
+				const parts = path.split('/');
+				let currentLevel = rootChildren;
+				let node = null;
+
+				for (const part of parts) {
+					if (!currentLevel || !currentLevel[part]) return null; // Path tidak valid
+					node = currentLevel[part];
+					currentLevel = node.children; // Lanjut ke level berikutnya
+				}
+				return (node && node.type === 'file') ? node : null;
+			};
+
 			window.Workspace = ({ project }) => {
 				const [selectedFile, setSelectedFile] = useState(null);
+				const [scrollToLine, setScrollToLine] = useState(null); // <-- State baru untuk trigger scroll
 				const [citations, setCitations] = useState([]);
 				const [sources, setSources] = useState([]); // State baru untuk menyimpan sumber referensi
+
+				// --- [Hook Auto-Sitasi - UPGRADED] ---
+				useEffect(() => {
+					if (!project || !project.children) return;
+
+					let processedCitations = [];
+					let processedSources = {}; // Gunakan map (by normalized title) untuk de-duplikasi source
+					let citationCounter = 0;
+
+					// Fungsi rekursif untuk menjelajahi file tree
+					// [PERUBAHAN]: Menambahkan 'currentPath' untuk melacak path lengkap
+					const traverseAndParse = (node, currentPath) => {
+						if (!node) return;
+						
+						// Buat path relatif untuk node ini
+						const nodeRelativePath = currentPath ? `${currentPath}/${node.name}` : node.name;
+
+						if (node.type === "file") {
+							const fileType = getFileType(node.name);
+							if (fileType === "python" || fileType === "java") {
+								const parsedItems = parseCitationsFromCode(node.content, fileType);
+
+								parsedItems.forEach((item) => {
+									const sourceData = item.sourceData;
+									if (!sourceData || !sourceData.title) {
+										console.warn("Item sitasi terdeteksi tanpa sourceData atau judul.", item);
+										return; // Abaikan sitasi tanpa judul
+									}
+
+									// Normalisasi judul untuk de-duplikasi
+									const normalizedTitle = sourceData.title.trim().toLowerCase();
+									let sourceId;
+
+									if (processedSources[normalizedTitle]) {
+										// --- Sumber SUDAH ADA (De-duplikasi) ---
+										sourceId = processedSources[normalizedTitle].id;
+
+										// LOGIKA PINTAR: Update sumber yang ada jika sitasi ini
+										// menyediakan metadata (Tipe/Value) yang sebelumnya kosong.
+										const existingSource = processedSources[normalizedTitle];
+										if (!existingSource.type && sourceData.type) {
+											existingSource.type = sourceData.type;
+										}
+										if (!existingSource.value && sourceData.value) {
+											existingSource.value = sourceData.value;
+										}
+									} else {
+										// --- Sumber BARU (Buat) ---
+										sourceId = `auto-source-${Date.now()}-${Object.keys(processedSources).length}`;
+
+										// Tentukan Tipe jika tidak ada:
+										let type = sourceData.type;
+										if (!type) {
+											const valueOrTitle = sourceData.value || sourceData.title || "";
+											if (valueOrTitle.match(/^https?:\/\//)) type = "url";
+											else if (sourceData.value) type = "other"; // Default jika value ada tapi bukan url
+											else type = "other";
+										}
+
+										// Tentukan Value jika tidak ada:
+										let value = sourceData.value;
+										if (!value) {
+											if (type === "url" && (sourceData.title || "").match(/^https?:\/\//)) {
+												value = sourceData.title; // Ambil URL dari judul (Format Cepat)
+											} else if (type === "url") {
+												value = "#"; // Placeholder jika tipe url tapi value kosong
+											} else {
+												value = "Dibuat otomatis dari komentar kode.";
+											}
+										}
+										
+										// Simpan sumber baru
+										processedSources[normalizedTitle] = {
+											id: sourceId,
+											title: sourceData.title, // Gunakan judul asli (case-sensitive)
+											type: type,
+											value: value,
+										};
+									}
+
+									// Buat objek sitasi baru
+									const newCitation = {
+										id: `auto-cite-${Date.now()}-${citationCounter++}`,
+										file: nodeRelativePath, // [PERUBAHAN]: Simpan path lengkap
+										start: item.start,
+										end: item.end,
+										code: item.code,
+										note: sourceData.notes || "Sitasi ini dibuat otomatis dari komentar kode.",
+										sourceId: sourceId,
+										color: COLORS[citationCounter % COLORS.length],
+										isEditing: false, // Langsung tampilkan (tidak dalam mode edit)
+									};
+
+									processedCitations.push(newCitation);
+								});
+							}
+						} else if (node.type === "folder" && node.children) {
+							// Rekursif ke children
+							Object.values(node.children).forEach(child => traverseAndParse(child, nodeRelativePath)); // [PERUBAHAN]: Teruskan path
+						}
+					};
+
+					// Mulai proses traversal dari root project (children-nya)
+					// [PERUBAHAN]: Mulai dengan path kosong
+					Object.values(project.children).forEach(child => traverseAndParse(child, ""));
+
+					// Set state dengan data yang sudah diproses
+					if (processedCitations.length > 0) {
+						setCitations(processedCitations);
+						setSources(Object.values(processedSources));
+					}
+				}, [project]); // Hanya jalankan saat 'project' prop berubah
+				// --- [AKHIR Hook Auto-Sitasi] ---
 
 				const handleAddCitation = (citationData) => {
 					// Cek duplikasi sebelum menambahkan form baru
@@ -396,7 +756,27 @@
 						console.error("Gagal memproses atau membuat file zip:", error);
 					}
 				};
-				
+
+				/**
+				 * [HANDLER BARU] Dipanggil saat item sitasi diklik.
+				 * @param {Object} citation - Objek sitasi yang diklik.
+				 */
+				const handleJumpToCitation = (citation) => {
+					if (!citation || !citation.file || !project.children) return;
+
+					// Cari node file berdasarkan path lengkap (e.g., "src/MainApp.java")
+					const fileNode = findFileNodeByPath(project.children, citation.file);
+					
+					if (fileNode) {
+						// 1. Ganti file yang ditampilkan di editor
+						setSelectedFile(fileNode);
+						// 2. Set baris yang akan di-scroll
+						setScrollToLine(citation.start);
+					} else {
+						console.error(`File node not found for path: ${citation.file}`);
+					}
+				};
+
 				return React.createElement(
 					"div",
 					{ className: "bg-white p-4 rounded-lg shadow-lg h-[80vh] flex flex-col" },
@@ -427,6 +807,8 @@
 							file: selectedFile,
 							onAddCitation: handleAddCitation,
 							citations: citations.filter((c) => !c.isEditing), // Hanya kirim sitasi yg sudah disimpan ke editor
+							scrollToLine: scrollToLine, // <-- [BARU] Kirim baris tujuan
+							onScrollDone: () => setScrollToLine(null), // <-- [BARU] Reset trigger
 						}),
 
 						// Citation Panel
@@ -449,7 +831,7 @@
 										onClick: handleExport,
 										className: "text-xs bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600",
 									},
-									"Save Cite to Project"
+									"Export Code Cite"
 								)
 							),
 
@@ -473,6 +855,7 @@
 											onCancel: handleCancelEdit,
 											onDelete: handleDeleteCitation,
 											onEdit: handleToggleEdit,
+											onJumpTo: handleJumpToCitation, // <-- [BARU] Kirim handler
 										})
 									)
 								)
@@ -536,7 +919,7 @@
 			//==================================================
 			// Component: Code Editor
 			//==================================================
-			window.CodeEditor = ({ file, onAddCitation, citations }) => {
+			window.CodeEditor = ({ file, onAddCitation, citations, scrollToLine, onScrollDone }) => {
 				const [lines, setLines] = useState([]);
 				const [dragStart, setDragStart] = useState(null);
 				const [dragEnd, setDragEnd] = useState(null);
@@ -573,14 +956,73 @@
 					isDraggingRef.current = isDragging;
 				}, [isDragging]);
 
+				// --- [EFEK BARU] UNTUK AUTO-SCROLL ---
+				useEffect(() => {
+					if (scrollToLine && editorRef.current && lines.length > 0) {
+						// Cari elemen barisnya
+						const lineElement = editorRef.current.querySelector(`[data-line="${scrollToLine}"]`);
+						
+						if (lineElement) {
+							// Lakukan scroll
+							lineElement.scrollIntoView({
+								behavior: "smooth",
+								block: "center", // Posisikan di tengah layar
+							});
+
+							// Tambahkan efek highlight "flash"
+							lineElement.classList.add("flash-highlight");
+							setTimeout(() => {
+								if (lineElement) {
+									lineElement.classList.remove("flash-highlight");
+								}
+							}, 1500); // Durasi flash 1.5 detik
+						}
+						
+						// Beri tahu parent bahwa scroll sudah selesai (atau setidaknya sudah di-trigger)
+						onScrollDone();
+					}
+				}, [scrollToLine, file, lines]); // Bergantung pada scrollToLine, file, dan render 'lines'
+				// --- [AKHIR EFEK BARU] ---
+
+
 				const handleGlobalMouseUp = (e) => {
 					if (isDraggingRef.current && dragStartRef.current != null && dragEndRef.current != null) {
 						const start = Math.min(dragStartRef.current, dragEndRef.current);
 						const end = Math.max(dragStartRef.current, dragEndRef.current);
+						
+						// [PERBAIKAN]: Ambil path lengkap dari 'file.name'
+						// Kita asumsikan 'file' object sekarang berisi path
+						// Mari kita cek 'buildFileTree'.
+						// `current[part] = { name: part, type: "file", content };`
+						// Oh, `file.name` HANYA NAMA. Path lengkap harusnya ada di...
+						// `selectedFile` di `Workspace` adalah `fileNode`.
+						// `fileNode` punya `name` dan `type` dan `content`.
+						// Path-nya tidak disimpan di node.
+						//
+						// SOLUSI: `onAddCitation` harus mengambil path dari `file` object.
+						// Mari kita asumsikan `file.path` akan ada.
+						// Tidak, `buildFileTree` tidak menambahkannya.
+						//
+						// SOLUSI SEMENTARA: Kita harus menggunakan `file.name` saja
+						// TAPI `selectedFile` di `Workspace` adalah `fileNode`
+						// Mari kita modifikasi `FileExplorer` untuk mengirim `node` utuh
+						// `onSelectFile: setSelectedFile` -> ini sudah mengirim node utuh
+						//
+						// Masalahnya ada di `handleAddCitation`
+						// `c.file === citationData.file`
+						// `citationData.file` harusnya path lengkap.
+						//
+						// Kita perlu `file.path` di sini.
+						// Mari kita asumsikan `file` yang diterima `CodeEditor`
+						// adalah `fileNode` yang memiliki `path`
+						
+						// Mari kita ubah `buildFileTree` untuk menyimpan path
+						// (Ini akan dilakukan di 'App' component)
+
 						const codeBlock = linesRef.current.slice(start - 1, end).join("\n");
 						if (onAddCitationRef.current) {
 							onAddCitationRef.current({
-								file: file.name,
+								file: file.path, // <-- [PERUBAHAN PENTING] Asumsikan file.path ada
 								start,
 								end,
 								code: codeBlock,
@@ -679,9 +1121,16 @@
 				};
 
 				const getHighlightColor = (lineNumber) => {
-					const citation = citations.find((c) => c.file === file.name && lineNumber >= c.start && lineNumber <= c.end);
-					if (citation) return citation.color;
+					// Cari sitasi yang *aktif* (non-editing)
+					const activeCitations = citations.filter((c) => c.file === file.path); // <-- [PERUBAHAN PENTING] Asumsikan file.path
 
+					for (const c of activeCitations) {
+						if (lineNumber >= c.start && lineNumber <= c.end) {
+							return c.color;
+						}
+					}
+
+					// Highlight untuk *dragging* manual
 					if (isDragging && dragStart != null && dragEnd != null) {
 						const start = Math.min(dragStart, dragEnd);
 						const end = Math.max(dragStart, dragEnd);
@@ -703,7 +1152,7 @@
 						onMouseUp: handleMouseUp,
 						onMouseMove: handleMouseMove,
 					},
-					React.createElement("div", { className: "bg-gray-700 text-white p-2 rounded-t-md flex-shrink-0" }, file.name),
+					React.createElement("div", { className: "bg-gray-700 text-white p-2 rounded-t-md flex-shrink-0" }, file.path), // <-- [PERUBAHAN PENTING] Tampilkan path
 					React.createElement(
 						"div",
 						{
@@ -745,7 +1194,7 @@
 			//==================================================
 			// Component: Citetation Item
 			//==================================================
-			window.CitationItem = ({ citation, source, allSources, onSave, onCancel, onDelete, onEdit }) => {
+			window.CitationItem = ({ citation, source, allSources, onSave, onCancel, onDelete, onEdit, onJumpTo }) => {
 				// State untuk form di dalam item ini
 				const [selectedSource, setSelectedSource] = useState("new");
 				const [newSourceTitle, setNewSourceTitle] = useState("");
@@ -763,11 +1212,24 @@
 							setSelectedSource("new");
 						}
 						setNote(citation.note || "");
+						// Reset form 'new source'
 						setNewSourceTitle("");
 						setNewSourceType("url");
 						setNewSourceValue("");
+
+						// Jika sitasi dibuat otomatis DAN belum diedit manual,
+						// coba isi form 'new source' dari data sitasi.
+						if (citation.id.startsWith("auto-cite-") && source) {
+							// Jika ini sitasi otomatis, kita ingin pengguna
+							// mengonfirmasi/mengedit sumber yang dibuat otomatis.
+							// Kita set dropdown ke 'new' dan isi field-nya.
+							setSelectedSource("new");
+							setNewSourceTitle(source.title);
+							setNewSourceType(source.type);
+							setNewSourceValue(source.value);
+						}
 					}
-				}, [citation.isEditing, citation.sourceId, citation.note, allSources]);
+				}, [citation.isEditing, citation.sourceId, citation.note, allSources, source]);
 
 				const handleSaveClick = () => {
 					// Validasi: Judul wajib diisi jika membuat sumber baru
@@ -776,12 +1238,20 @@
 						console.error("Judul referensi wajib diisi saat membuat sumber baru.");
 						return;
 					}
+
+					// Cek apakah ini sitasi otomatis yang sedang diedit
+					const isAutoCitationEdit = citation.id.startsWith("auto-cite-");
+
 					onSave(citation.id, {
 						selectedSource,
 						newSourceTitle,
 						newSourceType,
 						newSourceValue,
 						note,
+						// Jika ini edit pertama dari sitasi otomatis, kita mungkin
+						// ingin menghapus sumber otomatis lamanya jika tidak ada
+						// sitasi lain yang menggunakannya.
+						// (Logika ini bisa ditambahkan di 'handleSaveCitation' di Workspace)
 					});
 				};
 
@@ -802,8 +1272,12 @@
 									onChange: (e) => setSelectedSource(e.target.value),
 									className: "w-full border p-1 rounded",
 								},
-								React.createElement("option", { value: "new" }, "--- Buat Sumber Baru ---"),
-								allSources.map((s) => React.createElement("option", { key: s.id, value: s.id }, s.title))
+								React.createElement("option", { value: "new" }, "--- Buat / Edit Sumber ---"),
+								// Filter 'allSources' agar tidak menampilkan sumber otomatis
+								// yang terkait DENGAN sitasi ini (jika ada)
+								allSources
+									.filter((s) => s.id !== citation.sourceId || !citation.id.startsWith("auto-cite-"))
+									.map((s) => React.createElement("option", { key: s.id, value: s.id }, s.title))
 							)
 						),
 
@@ -885,7 +1359,15 @@
 							React.createElement("button", { onClick: () => onDelete(citation.id), className: "text-red-500 text-xs hover:underline" }, "Hapus")
 						)
 					),
-					React.createElement("div", { className: "text-gray-600 font-semibold" }, `${citation.file} (Baris ${citation.start}–${citation.end})`),
+					// [PERUBAHAN]: Teks ini sekarang clickable
+					React.createElement(
+						"div",
+						{
+							className: "text-gray-600 font-semibold cursor-pointer hover:text-cyan-600 hover:underline",
+							onClick: () => onJumpTo(citation), // <-- AKSI BARU
+						},
+						`${citation.file} (Baris ${citation.start}${citation.end !== citation.start ? `–${citation.end}` : ""})`
+					),
 					React.createElement("pre", { className: "bg-gray-100 p-1.5 rounded mt-1 overflow-x-auto text-[11px]" }, React.createElement("code", null, citation.code)),
 					citation.note && React.createElement("div", { className: "mt-1 pt-1 border-t" }, React.createElement("p", { className: "whitespace-pre-wrap" }, citation.note))
 				);
@@ -901,6 +1383,7 @@
 			const App = () => {
 				const [project, setProject] = useState(null);
 
+				// [PERUBAHAN]: buildFileTree sekarang menyimpan path lengkap di node
 				const buildFileTree = async (files) => {
 					const root = {};
 					for (const relativePath in files) {
@@ -912,12 +1395,23 @@
 						for (let i = 0; i < parts.length; i++) {
 							const part = parts[i];
 							const isFile = i === parts.length - 1;
+							const currentPath = parts.slice(0, i + 1).join('/');
 
 							if (isFile) {
 								const content = await files[relativePath].async("string");
-								current[part] = { name: part, type: "file", content };
+								current[part] = { 
+									name: part, 
+									path: currentPath, // <-- [BARU] Simpan path lengkap
+									type: "file", 
+									content 
+								};
 							} else {
-								current[part] = current[part] || { name: part, type: "folder", children: {} };
+								current[part] = current[part] || { 
+									name: part, 
+									path: currentPath, // <-- [BARU] Simpan path lengkap
+									type: "folder", 
+									children: {} 
+								};
 								current = current[part].children;
 							}
 						}
@@ -969,3 +1463,4 @@
 		</script>
 	</body>
 </html>
+
