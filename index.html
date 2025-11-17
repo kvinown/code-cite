@@ -178,7 +178,11 @@
 					if (selectedFile && selectedFile.name.endsWith(".zip")) {
 						setFile(selectedFile);
 						if (!projectName) {
-							setProjectName(selectedFile.name.replace(/\.zip$/, ""));
+							// [REVISI] Coba tebak nama proyek dari nama file zip
+							// "proyek-saya-codecite-timestamp.zip" -> "proyek-saya"
+							let name = selectedFile.name.replace(/\.zip$/, "");
+							name = name.replace(/-codecite-.*$/, ""); // Hapus suffix -codecite
+							setProjectName(name);
 						}
 					} else {
 						setError("Hanya mendukung file .zip");
@@ -299,8 +303,6 @@
 
 			/**
 			 * Mengidentifikasi tipe file berdasarkan nama file.
-			 * @param {string} fileName - Nama file (misal: "main.py", "App.java")
-			 * @returns {string|null} - 'python', 'java', atau null
 			 */
 			function getFileType(fileName) {
 				if (fileName.endsWith(".py")) {
@@ -312,12 +314,15 @@
 				return null;
 			}
 
+			// [BARU] Helper untuk membersihkan baris metadata
+			const cleanMetadataLine = (line, commentPrefixRegex) => {
+				return line.replace(commentPrefixRegex, "").trim();
+			};
+
 			/**
-			 * [FINAL UPGRADE]
+			 * [VERSI BARU - Diambil dari Ekstensi]
 			 * Mem-parsing konten kode untuk sitasi otomatis berdasarkan komentar.
-			 * @param {string} codeContent - Seluruh isi file kode sebagai string.
-			 * @param {string} fileType - Tipe file ('python' atau 'java').
-			 * @returns {Array<Object>} - Array berisi objek sitasi yang ditemukan.
+			 * Mendukung format Multi-baris (# CODE-CITE:) dan Single-line (#CODE-CITE #...).
 			 */
 			function parseCitationsFromCode(codeContent, fileType) {
 				const newCitations = [];
@@ -327,171 +332,156 @@
 
 				const lines = codeContent.split("\n");
 
-				// Definisikan semua regex berdasarkan tipe file
-				let commentPrefix, citeRegex, citeStartRegex, citeEndRegex, isCommentRegex, separatorRegex, commentPrefixRegex, keyValRegex;
+				// Definisikan regex berdasarkan tipe file
+				let commentPrefix, isCommentRegex, commentPrefixRegex, multiLineStartRegex, singleLineRegex;
 
 				if (fileType === "python") {
 					commentPrefix = "#";
 					isCommentRegex = /^\s*#/;
+					commentPrefixRegex = /^\s*#\s*/;
 				} else if (fileType === "java") {
-					commentPrefix = "\/\/";
+					commentPrefix = "//";
 					isCommentRegex = /^\s*\/\//;
+					commentPrefixRegex = /^\s*\/\/\s*/;
 				} else {
-					return newCitations; // Tipe file tidak didukung
+					return newCitations;
 				}
 
-				// Regex dinamis berdasarkan prefix komentar
-				citeRegex = new RegExp(`^\\s*${commentPrefix}\\s*CITE:\\s*(.*)$`, "i");
-				citeStartRegex = new RegExp(`^\\s*${commentPrefix}\\s*CITE-START:\\s*(.*)$`, "i");
-				citeEndRegex = new RegExp(`^\\s*${commentPrefix}\\s*CITE-END\\s*$`, "i");
-				separatorRegex = new RegExp(`^\\s*${commentPrefix}\\s*---\\s*$`, "i");
-				commentPrefixRegex = (fileType === "python") ? /^\s*#\s*/ : /^\s*\/\/\s*/;
-				keyValRegex = /^\s*([a-zA-Z]+):\s*(.*)$/; // Regex untuk "Key: Value"
+				// Regex dinamis
+				multiLineStartRegex = new RegExp(`^\\s*${commentPrefix}\\s*CODE-CITE:\\s*$`, "i");
+				singleLineRegex = new RegExp(`^\\s*${commentPrefix}\\s*CODE-CITE\\s+(.*)$`, "i");
+
+				const keyValRegex = /^\s*([a-zA-Z\s]+):\s*(.*)$/; // Regex untuk "Key: Value"
 
 				// Loop utama
 				for (let i = 0; i < lines.length; i++) {
 					const line = lines[i];
 					const lineNumber = i + 1; // 1-based index
 
-					const citeStartMatch = line.match(citeStartRegex);
-					const citeMatch = line.match(citeRegex);
+					const multiLineMatch = line.match(multiLineStartRegex);
+					const singleLineMatch = line.match(singleLineRegex);
 
-					// --- Skenario 1 & 2: Blok Sitasi (CITE-START) ---
-					if (citeStartMatch) {
-						const firstLineText = citeStartMatch[1].trim(); // Teks di baris CITE-START:
-						let sourceData = {};
-						let metadataLines = [];
-						let codeStartIndex = -1;
+					// --- Skenario 1: Format Multi-baris (# CODE-CITE:) ---
+					if (multiLineMatch) {
+						const metadataBlockLines = [];
+						const sourceData = { title: "" };
+						let linesRange = 1; // Default
+						let j = i + 1; // Mulai dari baris setelah # CODE-CITE:
 
-						// 1. Parse Metadata (baris antara CITE-START dan ---)
-						let j;
-						for (j = i + 1; j < lines.length; j++) {
-							const currentLine = lines[j];
-							if (citeEndRegex.test(currentLine)) break; // Menemukan CITE-END (tanpa kode)
-							if (separatorRegex.test(currentLine)) {
-								codeStartIndex = j + 1; // Kode dimulai setelah separator
-								break;
-							}
-							metadataLines.push(currentLine); // Ini adalah baris metadata
+						// 1. Kumpulkan semua baris metadata
+						while (j < lines.length && isCommentRegex.test(lines[j])) {
+							metadataBlockLines.push(lines[j]);
+							j++;
 						}
+						// 'j' sekarang adalah index dari baris KODE pertama
 
-						if (j === lines.length) {
-							// Tidak menemukan separator atau CITE-END
-							console.warn(`CITE-START di baris ${lineNumber} tidak ditutup atau tidak memiliki separator '---'.`);
-							continue;
-						}
-
-						// 2. Ekstrak data dari metadata
-						let hasStructuredKeys = false;
-						// Gabungkan teks dari baris CITE-START: dan baris metadata
-						const allMetadataText = [firstLineText, ...metadataLines];
-
-						for (const rawLine of allMetadataText) {
-							let cleanLine = rawLine.replace(commentPrefixRegex, "").trim();
+						// 2. Parse baris metadata
+						metadataBlockLines.forEach((rawLine) => {
+							const cleanLine = cleanMetadataLine(rawLine, commentPrefixRegex);
 							const match = cleanLine.match(keyValRegex);
 
 							if (match) {
-								hasStructuredKeys = true;
 								const key = match[1].trim().toLowerCase();
 								const value = match[2].trim();
-								if (key === "judul") sourceData.title = value;
-								else if (key === "tipe") sourceData.type = value.toLowerCase();
-								else if (key === "value") sourceData.value = value;
-								else if (key === "notes") sourceData.notes = value;
+
+								switch (key) {
+									case "title":
+										sourceData.title = value;
+										break;
+									case "type":
+										sourceData.type = value.toLowerCase();
+										break;
+									case "value":
+										sourceData.value = value;
+										break;
+									case "notes":
+										sourceData.notes = value;
+										break;
+									case "lines range":
+										linesRange = parseInt(value, 10) || 1;
+										break;
+								}
 							}
+						});
+
+						// 3. Validasi
+						if (!sourceData.title) {
+							console.warn(`CODE-CITE di baris ${lineNumber} tidak memiliki 'Title:'.`);
+							i = j - 1; // Lanjutkan loop dari baris kode
+							continue;
 						}
 
-						// 3. Tentukan Judul
-						// Jika tidak ada 'Judul:' key, TAPI ada teks di baris CITE-START:, gunakan itu sebagai judul
-						if (!sourceData.title && !hasStructuredKeys && firstLineText) {
-							sourceData.title = firstLineText;
+						// 4. Tentukan baris dan ambil kode
+						const startLine = j + 1; // 1-based index
+						const endLine = startLine + linesRange - 1;
+						if (endLine > lines.length) {
+							console.warn(`Lines Range di baris ${lineNumber} melebihi akhir file.`);
+							i = j - 1;
+							continue;
+						}
+
+						const codeBlock = lines.slice(j, j + linesRange).join("\n");
+
+						newCitations.push({
+							start: startLine,
+							end: endLine, // 'end' adalah inklusif
+							code: codeBlock,
+							sourceData: sourceData,
+						});
+
+						i = j + linesRange - 1; // Lompati baris kode yang sudah disitasi
+					}
+					// --- Skenario 2: Format Single-line (#CODE-CITE #...) ---
+					else if (singleLineMatch) {
+						const data = singleLineMatch[1]; // Mendapatkan " #title #type #value #notes #linesRange"
+						if (!data) continue;
+
+						// Pisahkan berdasarkan #, buang string kosong (jika ada)
+						const parts = data.split("#").map((s) => s.trim()).filter(Boolean);
+
+						if (parts.length === 0) continue; // Tidak ada data
+
+						const sourceData = {
+							title: parts[0] || "", // Wajib ada
+							type: parts[1],
+							value: parts[2],
+							notes: parts[3],
+						};
+
+						let linesRange = 1;
+						if (parts[4]) {
+							linesRange = parseInt(parts[4], 10) || 1;
 						}
 
 						if (!sourceData.title) {
-							console.warn(`CITE-START di baris ${lineNumber} tidak memiliki 'Judul:' atau teks judul sederhana.`);
-							i = j; // Loncat ke separator/CITE-END
+							console.warn(`CODE-CITE single-line di baris ${lineNumber} tidak memiliki title.`);
 							continue;
 						}
 
-						// 4. Cek apakah ada blok kode
-						if (codeStartIndex === -1) {
-							console.warn(`CITE-START di baris ${lineNumber} tidak memiliki '---' separator untuk blok kode.`);
-							i = j; // Loncat ke CITE-END
+						// Ambil 'linesRange' baris kode TEPAT DI BAWAHNYA.
+						const codeStartIndex = i + 1; // Index baris pertama kode
+						const startLine = codeStartIndex + 1; // 1-based index
+						const endLine = startLine + linesRange - 1;
+
+						if (endLine > lines.length) {
+							console.warn(`Lines Range di baris ${lineNumber} melebihi akhir file.`);
+							i++; // Lewati baris ini
 							continue;
 						}
 
-						// 5. Cari CITE-END untuk blok kode
-						let codeEndIndex = -1;
-						let k;
-						for (k = codeStartIndex; k < lines.length; k++) {
-							if (citeEndRegex.test(lines[k])) {
-								codeEndIndex = k; // Kode berakhir di baris *sebelum* CITE-END
-								break;
-							}
-						}
-
-						if (codeEndIndex === -1) {
-							console.warn(`CITE-START di baris ${lineNumber} tidak memiliki CITE-END setelah '---'.`);
-							continue; // Biarkan loop 'i' berlanjut
-						}
-
-						// 6. Buat sitasi
-						const codeBlock = lines.slice(codeStartIndex, codeEndIndex).join("\n");
-						// Validasi: Jangan sitasi jika baris 'start' > 'end' (blok kode kosong)
-						if (codeStartIndex >= codeEndIndex) {
-							console.warn(`CITE-START di baris ${lineNumber} memiliki blok kode kosong.`);
-							i = k; // Loncat ke CITE-END
-							continue;
-						}
+						const codeBlock = lines.slice(codeStartIndex, codeStartIndex + linesRange).join("\n");
 
 						newCitations.push({
-							start: codeStartIndex + 1, // 1-based
-							end: codeEndIndex, // 1-based (baris terakhir kode adalah `k-1`, indexnya `k`)
+							start: startLine,
+							end: endLine, // 'end' adalah inklusif
 							code: codeBlock,
-							sourceData: sourceData, // Kirim objek lengkap
+							sourceData: sourceData,
 						});
 
-						i = k; // Loncat loop utama ke CITE-END
+						i = codeStartIndex + linesRange - 1; // Lompati baris kode yang sudah disitasi
 					}
-					// --- Skenario 3: Sitasi Satu Baris (CITE:) ---
-					else if (citeMatch) {
-						const sourceText = citeMatch[1].trim();
-						if (!sourceText) continue; // Abaikan CITE: kosong
+				} // akhir loop 'for'
 
-						let nextCodeLine = null;
-						let nextCodeLineNumber = -1;
-
-						// Cari baris kode valid berikutnya
-						for (let j = i + 1; j < lines.length; j++) {
-							const potentialCodeLine = lines[j];
-							const isEmpty = potentialCodeLine.trim() === "";
-							const isComment = isCommentRegex.test(potentialCodeLine.trim());
-
-							// Cek apakah ini tag sitasi lain
-							const isCiteTag =
-								citeRegex.test(potentialCodeLine) ||
-								citeStartRegex.test(potentialCodeLine) ||
-								citeEndRegex.test(potentialCodeLine);
-
-							if (!isEmpty && !isComment && !isCiteTag) {
-								nextCodeLine = potentialCodeLine.trim();
-								nextCodeLineNumber = j + 1; // 1-based
-								break;
-							}
-						}
-
-						if (nextCodeLine) {
-							newCitations.push({
-								start: nextCodeLineNumber,
-								end: nextCodeLineNumber,
-								code: nextCodeLine,
-								sourceData: { title: sourceText }, // Format Cepat hanya punya judul
-							});
-
-							i = nextCodeLineNumber - 1; // Loncat ke baris kode yg baru disitasi
-						}
-					}
-				}
 				return newCitations;
 			}
 			//==================================================
@@ -505,43 +495,93 @@
 
 			/**
 			 * Helper function untuk mencari file node di dalam tree berdasarkan path.
-			 * @param {Object} rootChildren - Objek 'children' dari node project.
-			 * @param {string} path - Path file yang dicari (e.g., "src/MainApp.java").
-			 * @returns {Object|null} - Node file jika ditemukan, atau null.
 			 */
 			const findFileNodeByPath = (rootChildren, path) => {
-				const parts = path.split('/');
+				// [REVISI] Path dari JSON mungkin menyertakan nama root,
+				// file tree kita tidak. Kita harus tangani ini.
+				// e.g., "code_examples/MainApp.java"
+				
+				// Coba temukan path-nya langsung dulu
+				let parts = path.split('/');
 				let currentLevel = rootChildren;
 				let node = null;
-
-				for (const part of parts) {
-					if (!currentLevel || !currentLevel[part]) return null; // Path tidak valid
+				
+				for (let i = 0; i < parts.length; i++) {
+					const part = parts[i];
+					if (!currentLevel || !currentLevel[part]) {
+						node = null; // Path tidak ditemukan
+						break;
+					}
 					node = currentLevel[part];
-					currentLevel = node.children; // Lanjut ke level berikutnya
+					currentLevel = node.children;
 				}
+
+				if (node && node.type === 'file') return node;
+				
+				// JIKA GAGAL: Coba abaikan bagian pertama dari path (nama root)
+				// Ini untuk menangani file zip yang dibuat ekstensi
+				if (parts.length > 1) {
+					parts = parts.slice(1); // Hapus "code_examples"
+					currentLevel = rootChildren;
+					node = null;
+					for (const part of parts) {
+						if (!currentLevel || !currentLevel[part]) {
+							node = null;
+							break;
+						};
+						node = currentLevel[part];
+						currentLevel = node.children;
+					}
+				}
+
 				return (node && node.type === 'file') ? node : null;
+			};
+			
+			// [BARU] Helper untuk de-duplikasi
+			const getMetadataScore = (data) => {
+				if (data.value && data.value !== "#" && data.value !== "Dibuat otomatis dari komentar kode.") return 3;
+				if (data.type && data.type !== "other") return 2;
+				if (data.title) return 1;
+				return 0;
 			};
 
 			window.Workspace = ({ project }) => {
 				const [selectedFile, setSelectedFile] = useState(null);
-				const [scrollToLine, setScrollToLine] = useState(null); // <-- State baru untuk trigger scroll
+				const [scrollToLine, setScrollToLine] = useState(null); 
 				const [citations, setCitations] = useState([]);
-				const [sources, setSources] = useState([]); // State baru untuk menyimpan sumber referensi
+				const [sources, setSources] = useState([]);
 
-				// --- [Hook Auto-Sitasi - UPGRADED] ---
+				// --- [HOOK LOGIKA GABUNGAN (JSON + KOMENTAR)] ---
 				useEffect(() => {
 					if (!project || !project.children) return;
 
-					let processedCitations = [];
-					let processedSources = {}; // Gunakan map (by normalized title) untuk de-duplikasi source
-					let citationCounter = 0;
+					// Data dari JSON (Prioritas 1)
+					const initialCitations = project.initialCitations || [];
+					const initialSources = project.initialSources || [];
+					
+					// Map untuk de-duplikasi dan pencarian cepat
+					const citationMap = new Map(); // "file.path-start-end"
+					initialCitations.forEach(c => {
+						citationMap.set(`${c.file}-${c.start}-${c.end}`, c);
+					});
+					
+					const sourceTitleMap = new Map(); // "normalized_title"
+					const finalSourcesMap = new Map(); // "id"
+					
+					initialSources.forEach(s => {
+						const normalizedTitle = s.title.trim().toLowerCase();
+						sourceTitleMap.set(normalizedTitle, s);
+						finalSourcesMap.set(s.id, s);
+					});
 
-					// Fungsi rekursif untuk menjelajahi file tree
-					// [PERUBAHAN]: Menambahkan 'currentPath' untuk melacak path lengkap
+
+					// Data dari Komentar (Prioritas 2)
+					const tempCitations = [];
+					const sourceMetadataMap = new Map(); // "normalized_title" -> [data, data]
+
+					// --- LANGKAH 1: Pindai komentar ---
 					const traverseAndParse = (node, currentPath) => {
 						if (!node) return;
-						
-						// Buat path relatif untuk node ini
 						const nodeRelativePath = currentPath ? `${currentPath}/${node.name}` : node.name;
 
 						if (node.type === "file") {
@@ -551,95 +591,116 @@
 
 								parsedItems.forEach((item) => {
 									const sourceData = item.sourceData;
-									if (!sourceData || !sourceData.title) {
-										console.warn("Item sitasi terdeteksi tanpa sourceData atau judul.", item);
-										return; // Abaikan sitasi tanpa judul
-									}
-
-									// Normalisasi judul untuk de-duplikasi
 									const normalizedTitle = sourceData.title.trim().toLowerCase();
-									let sourceId;
-
-									if (processedSources[normalizedTitle]) {
-										// --- Sumber SUDAH ADA (De-duplikasi) ---
-										sourceId = processedSources[normalizedTitle].id;
-
-										// LOGIKA PINTAR: Update sumber yang ada jika sitasi ini
-										// menyediakan metadata (Tipe/Value) yang sebelumnya kosong.
-										const existingSource = processedSources[normalizedTitle];
-										if (!existingSource.type && sourceData.type) {
-											existingSource.type = sourceData.type;
-										}
-										if (!existingSource.value && sourceData.value) {
-											existingSource.value = sourceData.value;
-										}
-									} else {
-										// --- Sumber BARU (Buat) ---
-										sourceId = `auto-source-${Date.now()}-${Object.keys(processedSources).length}`;
-
-										// Tentukan Tipe jika tidak ada:
-										let type = sourceData.type;
-										if (!type) {
-											const valueOrTitle = sourceData.value || sourceData.title || "";
-											if (valueOrTitle.match(/^https?:\/\//)) type = "url";
-											else if (sourceData.value) type = "other"; // Default jika value ada tapi bukan url
-											else type = "other";
-										}
-
-										// Tentukan Value jika tidak ada:
-										let value = sourceData.value;
-										if (!value) {
-											if (type === "url" && (sourceData.title || "").match(/^https?:\/\//)) {
-												value = sourceData.title; // Ambil URL dari judul (Format Cepat)
-											} else if (type === "url") {
-												value = "#"; // Placeholder jika tipe url tapi value kosong
-											} else {
-												value = "Dibuat otomatis dari komentar kode.";
-											}
-										}
-										
-										// Simpan sumber baru
-										processedSources[normalizedTitle] = {
-											id: sourceId,
-											title: sourceData.title, // Gunakan judul asli (case-sensitive)
-											type: type,
-											value: value,
-										};
+									
+									// Cek de-duplikasi JSON
+									const citationKey = `${nodeRelativePath}-${item.start}-${item.end}`;
+									if (citationMap.has(citationKey)) {
+										return; // Sitasi ini sudah ada dari JSON, abaikan
 									}
 
-									// Buat objek sitasi baru
-									const newCitation = {
-										id: `auto-cite-${Date.now()}-${citationCounter++}`,
-										file: nodeRelativePath, // [PERUBAHAN]: Simpan path lengkap
-										start: item.start,
-										end: item.end,
-										code: item.code,
-										note: sourceData.notes || "Sitasi ini dibuat otomatis dari komentar kode.",
-										sourceId: sourceId,
-										color: COLORS[citationCounter % COLORS.length],
-										isEditing: false, // Langsung tampilkan (tidak dalam mode edit)
-									};
+									// Kumpulkan sitasi komentar baru
+									tempCitations.push({
+										item: item,
+										zipPath: nodeRelativePath,
+										normalizedTitle: normalizedTitle,
+									});
 
-									processedCitations.push(newCitation);
+									// Kumpulkan metadata sumber
+									if (!sourceMetadataMap.has(normalizedTitle)) {
+										sourceMetadataMap.set(normalizedTitle, []);
+									}
+									sourceMetadataMap.get(normalizedTitle).push(sourceData);
 								});
 							}
 						} else if (node.type === "folder" && node.children) {
-							// Rekursif ke children
-							Object.values(node.children).forEach(child => traverseAndParse(child, nodeRelativePath)); // [PERUBAHAN]: Teruskan path
+							Object.values(node.children).forEach(child => traverseAndParse(child, nodeRelativePath));
 						}
 					};
 
-					// Mulai proses traversal dari root project (children-nya)
-					// [PERUBAHAN]: Mulai dengan path kosong
+					// Mulai pindai dari root (children)
 					Object.values(project.children).forEach(child => traverseAndParse(child, ""));
 
-					// Set state dengan data yang sudah diproses
-					if (processedCitations.length > 0) {
-						setCitations(processedCitations);
-						setSources(Object.values(processedSources));
-					}
-				}, [project]); // Hanya jalankan saat 'project' prop berubah
-				// --- [AKHIR Hook Auto-Sitasi] ---
+					// --- LANGKAH 2: Gabungkan Sumber (Sources) ---
+					let citationCounter = initialCitations.length;
+					const sourceIdMap = new Map(); // Map<normalizedTitle, sourceId>
+					
+					sourceTitleMap.forEach((source, normalizedTitle) => {
+						sourceIdMap.set(normalizedTitle, source.id);
+					});
+
+					sourceMetadataMap.forEach((dataList, normalizedTitle) => {
+						// Jika sumber ini SUDAH ADA dari JSON, lewati (kita hanya de-duplikasi)
+						if (sourceTitleMap.has(normalizedTitle)) {
+							return; 
+						}
+						
+						// Jika ini sumber BARU dari komentar, buat
+						const bestData = dataList.sort((a, b) => getMetadataScore(b) - getMetadataScore(a))[0];
+
+						let type = bestData.type;
+						if (!type) {
+							const valueOrTitle = bestData.value || bestData.title || "";
+							if (valueOrTitle.match(/^https?:\/\//)) type = "url";
+							else if (bestData.value) type = "other";
+							else type = "other";
+						}
+
+						let value = bestData.value;
+						if (!value) {
+							if (type === "url" && (bestData.title || "").match(/^https?:\/\//)) {
+								value = bestData.title;
+							} else if (type === "url") {
+								value = "#";
+							} else {
+								value = "Dibuat otomatis dari komentar kode.";
+							}
+						}
+
+						const sourceId = `auto-source-${Date.now()}-${citationCounter++}`;
+						const newSource = {
+							id: sourceId,
+							title: bestData.title,
+							type: type,
+							value: value,
+						};
+						
+						finalSourcesMap.set(sourceId, newSource);
+						sourceIdMap.set(normalizedTitle, sourceId);
+					});
+					
+					// --- LANGKAH 3: Gabungkan Sitasi (Citations) ---
+					const newCitations = [];
+					tempCitations.forEach((tempCite) => {
+						const sourceId = sourceIdMap.get(tempCite.normalizedTitle);
+						if (!sourceId) return; 
+
+						newCitations.push({
+							id: `auto-cite-${Date.now()}-${citationCounter++}`,
+							file: tempCite.zipPath,
+							start: tempCite.item.start,
+							end: tempCite.item.end,
+							code: tempCite.item.code,
+							note: tempCite.item.sourceData.notes || "Sitasi ini dibuat otomatis dari komentar kode.",
+							sourceId: sourceId,
+							color: COLORS[citationCounter % COLORS.length],
+							isEditing: false, 
+						});
+					});
+
+					// --- LANGKAH 4: Set State ---
+					// Kita perlu memberi 'color' dan 'isEditing' pada sitasi awal
+					const finalInitialCitations = initialCitations.map((c, i) => ({
+						...c,
+						color: COLORS[i % COLORS.length],
+						isEditing: false,
+					}));
+					
+					setSources(Array.from(finalSourcesMap.values()));
+					setCitations([...finalInitialCitations, ...newCitations]);
+
+				}, [project]);
+				// --- [AKHIR HOOK LOGIKA GABUNGAN] ---
 
 				const handleAddCitation = (citationData) => {
 					// Cek duplikasi sebelum menambahkan form baru
@@ -714,28 +775,43 @@
 					setCitations(updatedCitations);
 				};
 
+				// --- [REVISI] handleExport sekarang akan menghapus JSON lama ---
 				const handleExport = async () => {
-					// Validasi: Pastikan file zip asli ada
 					if (!project.originalFile) {
-						console.error("File zip asli tidak tersedia. Pastikan file ini diteruskan dalam prop 'project'.");
+						console.error("File zip asli tidak tersedia.");
 						return;
 					}
-
+					
+					// Data baru untuk diekspor
 					const dataToExport = {
 						sources: sources,
-						// Hapus properti sementara (seperti isEditing dan color) sebelum diekspor
-						citations: citations.map(({ isEditing, color, ...rest }) => rest),
+						citations: citations.map(({ isEditing, color, ...rest }) => rest), // Hapus data UI
 					};
 					const jsonString = JSON.stringify(dataToExport, null, 2);
 
 					try {
-						// INI BAGIAN KUNCINYA: Muat file zip ASLI yang diunggah
+						// Muat file zip ASLI yang diunggah
 						const zip = await JSZip.loadAsync(project.originalFile);
 
-						// Tambahkan file metadata .json ke dalam objek zip yang sudah ada
-						zip.file(`${project.name}.codesite.json`, jsonString);
+						// [REVISI] Cari dan hapus file .codesite.json LAMA
+						// Kita asumsikan nama file JSON sama dengan nama proyek
+						const jsonFileName = `${project.name}.codesite.json`;
+						
+						// Cek di root (format website)
+						if (zip.files[jsonFileName]) {
+							zip.remove(jsonFileName);
+						}
+						
+						// Cek di dalam folder (format ekstensi lama, jaga-jaga)
+						const oldJsonPath = `${project.name}/${project.name}.codesite.json`;
+						if (zip.files[oldJsonPath]) {
+							zip.remove(oldJsonPath);
+						}
 
-						// Generate file zip BARU yang sudah berisi file lama + file metadata
+						// Tambahkan file metadata BARU ke root zip
+						zip.file(jsonFileName, jsonString);
+
+						// Generate file zip BARU
 						const newZipBlob = await zip.generateAsync({ type: "blob" });
 
 						// Buat nama file unik dengan timestamp
@@ -744,33 +820,28 @@
 						const timestamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
 						const newFilename = `${project.name}-codecite-${timestamp}.zip`;
 
-						// Memicu unduhan di browser
+						// Memicu unduhan
 						const link = document.createElement("a");
 						link.href = URL.createObjectURL(newZipBlob);
 						link.download = newFilename;
 						document.body.appendChild(link);
 						link.click();
 						document.body.removeChild(link);
-						URL.revokeObjectURL(link.href); // Membersihkan memori
+						URL.revokeObjectURL(link.href);
 					} catch (error) {
 						console.error("Gagal memproses atau membuat file zip:", error);
 					}
 				};
+				// --- [AKHIR REVISI handleExport] ---
 
-				/**
-				 * [HANDLER BARU] Dipanggil saat item sitasi diklik.
-				 * @param {Object} citation - Objek sitasi yang diklik.
-				 */
 				const handleJumpToCitation = (citation) => {
 					if (!citation || !citation.file || !project.children) return;
 
-					// Cari node file berdasarkan path lengkap (e.g., "src/MainApp.java")
+					// Cari node file berdasarkan path lengkap
 					const fileNode = findFileNodeByPath(project.children, citation.file);
 					
 					if (fileNode) {
-						// 1. Ganti file yang ditampilkan di editor
 						setSelectedFile(fileNode);
-						// 2. Set baris yang akan di-scroll
 						setScrollToLine(citation.start);
 					} else {
 						console.error(`File node not found for path: ${citation.file}`);
@@ -806,9 +877,9 @@
 						React.createElement(window.CodeEditor, {
 							file: selectedFile,
 							onAddCitation: handleAddCitation,
-							citations: citations.filter((c) => !c.isEditing), // Hanya kirim sitasi yg sudah disimpan ke editor
-							scrollToLine: scrollToLine, // <-- [BARU] Kirim baris tujuan
-							onScrollDone: () => setScrollToLine(null), // <-- [BARU] Reset trigger
+							citations: citations, // Kirim SEMUA sitasi
+							scrollToLine: scrollToLine, 
+							onScrollDone: () => setScrollToLine(null), 
 						}),
 
 						// Citation Panel
@@ -855,7 +926,7 @@
 											onCancel: handleCancelEdit,
 											onDelete: handleDeleteCitation,
 											onEdit: handleToggleEdit,
-											onJumpTo: handleJumpToCitation, // <-- [BARU] Kirim handler
+											onJumpTo: handleJumpToCitation, 
 										})
 									)
 								)
@@ -990,39 +1061,10 @@
 						const start = Math.min(dragStartRef.current, dragEndRef.current);
 						const end = Math.max(dragStartRef.current, dragEndRef.current);
 						
-						// [PERBAIKAN]: Ambil path lengkap dari 'file.name'
-						// Kita asumsikan 'file' object sekarang berisi path
-						// Mari kita cek 'buildFileTree'.
-						// `current[part] = { name: part, type: "file", content };`
-						// Oh, `file.name` HANYA NAMA. Path lengkap harusnya ada di...
-						// `selectedFile` di `Workspace` adalah `fileNode`.
-						// `fileNode` punya `name` dan `type` dan `content`.
-						// Path-nya tidak disimpan di node.
-						//
-						// SOLUSI: `onAddCitation` harus mengambil path dari `file` object.
-						// Mari kita asumsikan `file.path` akan ada.
-						// Tidak, `buildFileTree` tidak menambahkannya.
-						//
-						// SOLUSI SEMENTARA: Kita harus menggunakan `file.name` saja
-						// TAPI `selectedFile` di `Workspace` adalah `fileNode`
-						// Mari kita modifikasi `FileExplorer` untuk mengirim `node` utuh
-						// `onSelectFile: setSelectedFile` -> ini sudah mengirim node utuh
-						//
-						// Masalahnya ada di `handleAddCitation`
-						// `c.file === citationData.file`
-						// `citationData.file` harusnya path lengkap.
-						//
-						// Kita perlu `file.path` di sini.
-						// Mari kita asumsikan `file` yang diterima `CodeEditor`
-						// adalah `fileNode` yang memiliki `path`
-						
-						// Mari kita ubah `buildFileTree` untuk menyimpan path
-						// (Ini akan dilakukan di 'App' component)
-
 						const codeBlock = linesRef.current.slice(start - 1, end).join("\n");
 						if (onAddCitationRef.current) {
 							onAddCitationRef.current({
-								file: file.path, // <-- [PERUBAHAN PENTING] Asumsikan file.path ada
+								file: file.path, // <-- Gunakan file.path
 								start,
 								end,
 								code: codeBlock,
@@ -1120,17 +1162,29 @@
 					globalMouseUpHandlerRef.current(e);
 				};
 
+				// --- [FUNGSI DIPERBARUI DENGAN LOGIKA PRIORITAS] ---
 				const getHighlightColor = (lineNumber) => {
-					// Cari sitasi yang *aktif* (non-editing)
-					const activeCitations = citations.filter((c) => c.file === file.path); // <-- [PERUBAHAN PENTING] Asumsikan file.path
+					if (!file) return "";
 
-					for (const c of activeCitations) {
-						if (lineNumber >= c.start && lineNumber <= c.end) {
-							return c.color;
-						}
+					// 1. PRIORITAS TERTINGGI: Cek sitasi yang sedang di-edit
+					const editingCitation = citations.find(
+						(c) => c.file === file.path && c.isEditing && lineNumber >= c.start && lineNumber <= c.end
+					);
+					if (editingCitation) {
+						return "bg-yellow-500/50"; // <-- Warna highlight SEMENTARA
 					}
 
-					// Highlight untuk *dragging* manual
+					// 2. PRIORITAS KEDUA: Cek sitasi yang sudah disimpan
+					//    Kita cari dari belakang (reverse) agar sitasi terbaru tampil di atas
+					const savedCitation = citations
+						.slice()
+						.reverse()
+						.find((c) => c.file === file.path && !c.isEditing && lineNumber >= c.start && lineNumber <= c.end);
+					if (savedCitation) {
+						return savedCitation.color; // <-- Warna highlight PERMANEN
+					}
+
+					// 3. PRIORITAS KETIGA: Highlight untuk *dragging* manual (sebelum mouse up)
 					if (isDragging && dragStart != null && dragEnd != null) {
 						const start = Math.min(dragStart, dragEnd);
 						const end = Math.max(dragStart, dragEnd);
@@ -1138,8 +1192,11 @@
 							return "bg-cyan-900/40";
 						}
 					}
+
+					// 4. Tidak ada highlight
 					return "";
 				};
+				// --- [AKHIR FUNGSI DIPERBARUI] ---
 
 				if (!file) {
 					return React.createElement("div", { className: "col-span-12 md:col-span-6 bg-[#282c34] rounded-md flex flex-col h-full overflow-y-auto items-center justify-center text-gray-400" }, "Pilih file untuk ditampilkan");
@@ -1152,7 +1209,7 @@
 						onMouseUp: handleMouseUp,
 						onMouseMove: handleMouseMove,
 					},
-					React.createElement("div", { className: "bg-gray-700 text-white p-2 rounded-t-md flex-shrink-0" }, file.path), // <-- [PERUBAHAN PENTING] Tampilkan path
+					React.createElement("div", { className: "bg-gray-700 text-white p-2 rounded-t-md flex-shrink-0" }, file.path), // <-- Tampilkan path
 					React.createElement(
 						"div",
 						{
@@ -1355,8 +1412,8 @@
 						React.createElement(
 							"div",
 							{ className: "flex space-x-2" },
-							React.createElement("button", { onClick: () => onEdit(citation.id), className: "text-blue-500 text-xs hover:underline" }, "Ubah"),
-							React.createElement("button", { onClick: () => onDelete(citation.id), className: "text-red-500 text-xs hover:underline" }, "Hapus")
+							React.createElement("button", { onClick: () => onEdit(citation.id), className: "text-xs font-medium text-blue-700 bg-blue-100 hover:bg-blue-200 border border-blue-300 rounded-md px-2 py-0.5" }, "Ubah"),
+							React.createElement("button", { onClick: () => onDelete(citation.id), className: "text-xs font-medium text-red-700 bg-red-100 hover:bg-red-200 border border-red-300 rounded-md px-2 py-0.5" }, "Hapus")
 						)
 					),
 					// [PERUBAHAN]: Teks ini sekarang clickable
@@ -1383,11 +1440,30 @@
 			const App = () => {
 				const [project, setProject] = useState(null);
 
-				// [PERUBAHAN]: buildFileTree sekarang menyimpan path lengkap di node
-				const buildFileTree = async (files) => {
+				// [REVISI] buildFileTree sekarang menyimpan path lengkap di node
+				const buildFileTree = async (files, onJsonFound) => {
 					const root = {};
+					
+					// [REVISI] Cari file JSON terlebih dahulu
+					const jsonFileEntry = Object.entries(files).find(([relativePath, file]) => 
+						!file.dir && relativePath.endsWith('.codesite.json')
+					);
+					
+					if (jsonFileEntry) {
+						const [relativePath, jsonFile] = jsonFileEntry;
+						try {
+							const jsonContent = await jsonFile.async("string");
+							const parsedData = JSON.parse(jsonContent);
+							onJsonFound(parsedData);
+						} catch (err) {
+							console.error("Gagal mem-parsing file .codesite.json:", err);
+						}
+					}
+
+					// Sekarang bangun file tree untuk file-file lainnya
 					for (const relativePath in files) {
-						if (files[relativePath].dir) continue;
+						const file = files[relativePath];
+						if (file.dir || relativePath.endsWith('.codesite.json')) continue; // Lewati folder & file json
 
 						const parts = relativePath.split("/").filter((p) => p);
 						let current = root;
@@ -1401,14 +1477,14 @@
 								const content = await files[relativePath].async("string");
 								current[part] = { 
 									name: part, 
-									path: currentPath, // <-- [BARU] Simpan path lengkap
+									path: currentPath, // <-- Simpan path lengkap
 									type: "file", 
 									content 
 								};
 							} else {
 								current[part] = current[part] || { 
 									name: part, 
-									path: currentPath, // <-- [BARU] Simpan path lengkap
+									path: currentPath, // <-- Simpan path lengkap
 									type: "folder", 
 									children: {} 
 								};
@@ -1419,16 +1495,29 @@
 					return root;
 				};
 
+				// [REVISI] handleUpload sekarang menangani impor JSON
 				const handleUpload = async (file, projectName) => {
 					try {
 						const zip = await JSZip.loadAsync(file);
-						const fileTree = await buildFileTree(zip.files);
+						
+						let initialData = { sources: [], citations: [] };
+						
+						// Fungsi callback untuk mengambil data JSON
+						const onJsonFound = (parsedData) => {
+							initialData.sources = parsedData.sources || [];
+							initialData.citations = parsedData.citations || [];
+						};
+
+						// buildFileTree sekarang akan mencari JSON DAN membangun tree
+						const fileTree = await buildFileTree(zip.files, onJsonFound);
 
 						setProject({
 							name: projectName,
 							children: fileTree,
 							type: "folder",
 							originalFile: file,
+							initialSources: initialData.sources,
+							initialCitations: initialData.citations,
 						});
 					} catch (error) {
 						console.error("Gagal memproses file zip:", error);
@@ -1463,4 +1552,3 @@
 		</script>
 	</body>
 </html>
-
